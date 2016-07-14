@@ -63,10 +63,10 @@ class Emotiva(object):
   XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>'.encode('utf-8') 
   DISCOVER_REQ_PORT = 7000
   DISCOVER_RESP_PORT = 7001
-  NOTIFY_EVENTS = [
+  NOTIFY_EVENTS = set([
       'power', 'zone2_power', 'source', 'mode', 'volume', 'audio_input',
       'audio_bitstream', 'video_input', 'video_format'
-  ] + ['input_%d' % d for d in range(1, 9)]
+  ]).union(set(['input_%d' % d for d in range(1, 9)]))
   __notifier = EmotivaNotifier()
 
   def __init__(self, ip, transp_xml):
@@ -80,6 +80,9 @@ class Emotiva(object):
     self._setup_port_tcp = None
     self._ctrl_sock = None
 
+    # current state
+    self._current_state = dict(((ev, None) for ev in self.NOTIFY_EVENTS))
+
     self.__parse_transponder(transp_xml)
     if not self._ctrl_port or not self._notify_port:
       raise InvalidTransponderResponse("Coulnd't find ctrl/notify ports")
@@ -91,25 +94,25 @@ class Emotiva(object):
     self.__notifier.register(self._ip, self._notify_port, self._notify_handler)
     self._subscribe_events(self.NOTIFY_EVENTS)
 
-  def _send_request(self, req, ack=True):
+  def _send_request(self, req, ack=False):
     self._ctrl_sock.sendto(req, (self._ip, self._ctrl_port))
 
-    while True:
+    while ack:
       try:
         _resp_data, (ip, port) = self._ctrl_sock.recvfrom(2048)
         resp = self._parse_response(_resp_data)
-        print("RESP: " + _resp_data.decode('utf-8'))
+        self._handle_status(resp)
       except socket.timeout:
         break
 
   def _notify_handler(self, data):
     resp = self._parse_response(data)
-    print(resp)
+    self._handle_status(resp)
 
   def _subscribe_events(self, events):
     msg = self.format_request('emotivaSubscription',
                               [(ev, None) for ev in events])
-    self._send_request(msg)
+    self._send_request(msg, ack=True)
 
   def __parse_transponder(self, transp_xml):
     elem = transp_xml.find('name')
@@ -128,6 +131,17 @@ class Emotiva(object):
     if elem is not None: self._info_port = int(elem.text)
     elem = ctrl.find('setupPortTCP')
     if elem is not None: self._setup_port_tcp = int(elem.text)
+
+  def _handle_status(self, resp):
+    for elem in resp:
+      if elem.tag not in self._current_state:
+        print('Unknown element: %s' % elem.tag)
+        continue
+      val = elem.get('value')
+      if val is not None:
+        self._current_state[elem.tag] = val.strip()
+        print("Updated '%s' <- '%s'" % (elem.tag,
+            self._current_state[elem.tag]))
 
   @classmethod
   def discover(cls):
@@ -177,19 +191,14 @@ class Emotiva(object):
     pkt = builder.close()
     return output + ET.tostring(pkt)
 
-foo = Emotiva.format_request('emotivaControl', [('volume', {'value': '1', 'ack': 'yes'})])
-bar = Emotiva.discover()
+  @property
+  def power(self):
+    if self._current_state['power'] == 'On':
+      return True
+    return False
 
-
-# recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# recv_sock.bind(('', 7001))
-#  
-# sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# sock.bind(('', 0))
-# sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-# sock.sendto(output, ('<broadcast>', 7000))
-# 
-# data, addr = recv_sock.recvfrom(2048)
-# data_lines = data.decode('utf-8').split('\n')
-# data_joined = ''.join([x.strip() for x in data_lines])
-# root = ET.fromstring(data_joined)
+  @power.setter
+  def power(self, onoff):
+    cmd = {True: 'power_on', False: 'power_off'}[onoff]
+    msg = self.format_request('emotivaControl', [(cmd, {'value': '0'})])
+    self._send_request(msg)
