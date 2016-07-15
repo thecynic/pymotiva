@@ -137,9 +137,13 @@ class Emotiva(object):
       if elem.tag not in self._current_state:
         print('Unknown element: %s' % elem.tag)
         continue
-      val = elem.get('value')
-      if val is not None:
-        self._current_state[elem.tag] = val.strip()
+      val = (elem.get('value') or '').strip()
+      visible = (elem.get('visible') or '').strip()
+      if ((elem.tag.startswith('input_') or elem.tag.startswith('mode_'))
+          and visible != "true"):
+        continue
+      if val:
+        self._current_state[elem.tag] = val
         print("Updated '%s' <- '%s'" % (elem.tag,
             self._current_state[elem.tag]))
 
@@ -202,3 +206,24 @@ class Emotiva(object):
     cmd = {True: 'power_on', False: 'power_off'}[onoff]
     msg = self.format_request('emotivaControl', [(cmd, {'value': '0'})])
     self._send_request(msg)
+
+  @property
+  def volume(self):
+    if self._current_state['volume'] != None:
+      return int(self._current_state['volume'])
+    return None
+
+  def _volume_step(self, incr):
+    # The XMC-1 with firmware version <= 3.1a will not change the volume unless
+    # the volume overlay is up. So, we first send a noop command for volume step
+    # with value 0, and then send the real step.
+    noop = self.format_request('emotivaControl', [('volume', {'value': '0'})])
+    msg = self.format_request('emotivaControl', [('volume', {'value': str(incr)})])
+    self._send_request(noop)
+    self._send_request(msg)
+
+  def volume_up(self):
+    self._volume_step(1)
+
+  def volume_down(self):
+    self._volume_step(-1)
