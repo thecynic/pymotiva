@@ -16,7 +16,11 @@ class Error(Exception):
   pass
 
 
-class InvalidTransponderResponse(Error):
+class InvalidTransponderResponseError(Error):
+  pass
+
+
+class InvalidSourceError(Error):
   pass
 
 
@@ -45,7 +49,7 @@ class EmotivaNotifier(threading.Thread):
         self._devs[ip] = callback
 
   def run(self):
-    print("Created")
+    _LOGGER.info("Connected")
     while True:
       events = self._epoll.poll(1)
       for fileno, event in events:
@@ -82,10 +86,11 @@ class Emotiva(object):
 
     # current state
     self._current_state = dict(((ev, None) for ev in self.NOTIFY_EVENTS))
+    self._sources = {}
 
     self.__parse_transponder(transp_xml)
     if not self._ctrl_port or not self._notify_port:
-      raise InvalidTransponderResponse("Coulnd't find ctrl/notify ports")
+      raise InvalidTransponderResponseError("Coulnd't find ctrl/notify ports")
 
   def connect(self):
     self._ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -144,8 +149,10 @@ class Emotiva(object):
         continue
       if val:
         self._current_state[elem.tag] = val
-        print("Updated '%s' <- '%s'" % (elem.tag,
-            self._current_state[elem.tag]))
+        print("Updated '%s' <- '%s'" % (elem.tag, val))
+      if elem.tag.startswith('input_'):
+        num = elem.tag[6:]
+        self._sources[val] = int(num)
 
   @classmethod
   def discover(cls):
@@ -227,3 +234,22 @@ class Emotiva(object):
 
   def volume_down(self):
     self._volume_step(-1)
+
+  @property
+  def sources(self):
+    return tuple(self._sources.keys())
+
+  @property
+  def source(self):
+    return self._current_state['source']
+
+  @source.setter
+  def source(self, val):
+    if val not in self._sources:
+      raise InvalidSourceError('Source "%s" is not a valid input' % val)
+    elif self._sources[val] is None:
+      raise InvalidSourceError('Source "%s" has bad value (%s)' % (
+          val, self._sources[val]))
+    msg = self.format_request('emotivaControl',
+        [('source_%d' % self._sources[val], {'value': '0'})])
+    self._send_request(msg)
