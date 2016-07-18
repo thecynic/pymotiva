@@ -57,7 +57,7 @@ class EmotivaNotifier(threading.Thread):
           with self._lock:
             sock = self._socks_by_fileno[fileno]
           data, (ip, port) = sock.recvfrom(2048)
-          print("Got data %s from %s:%d" % (data, ip, port))
+          _LOGGER.debug("Got data %s from %s:%d" % (data, ip, port))
           with self._lock:
             cb = self._devs[ip]
           cb(data)
@@ -69,7 +69,7 @@ class Emotiva(object):
   DISCOVER_RESP_PORT = 7001
   NOTIFY_EVENTS = set([
       'power', 'zone2_power', 'source', 'mode', 'volume', 'audio_input',
-      'audio_bitstream', 'video_input', 'video_format'
+      'audio_bitstream', 'video_input', 'video_format',
   ]).union(set(['input_%d' % d for d in range(1, 9)]))
   __notifier = EmotivaNotifier()
 
@@ -83,10 +83,12 @@ class Emotiva(object):
     self._info_port = None
     self._setup_port_tcp = None
     self._ctrl_sock = None
+    self._update_cb = None
 
     # current state
     self._current_state = dict(((ev, None) for ev in self.NOTIFY_EVENTS))
     self._sources = {}
+    self._muted = False
 
     self.__parse_transponder(transp_xml)
     if not self._ctrl_port or not self._notify_port:
@@ -140,19 +142,30 @@ class Emotiva(object):
   def _handle_status(self, resp):
     for elem in resp:
       if elem.tag not in self._current_state:
-        print('Unknown element: %s' % elem.tag)
+        _LOGGER.debug('Unknown element: %s' % elem.tag)
         continue
       val = (elem.get('value') or '').strip()
       visible = (elem.get('visible') or '').strip()
       if ((elem.tag.startswith('input_') or elem.tag.startswith('mode_'))
           and visible != "true"):
         continue
+      if elem.tag == 'volume':
+        if val == 'Mute':
+          self._muted = True
+          continue
+        self._muted = False
+        # fall through
       if val:
         self._current_state[elem.tag] = val
-        print("Updated '%s' <- '%s'" % (elem.tag, val))
+        _LOGGER.debug("Updated '%s' <- '%s'" % (elem.tag, val))
       if elem.tag.startswith('input_'):
         num = elem.tag[6:]
         self._sources[val] = int(num)
+    if self._update_cb:
+      self._update_cb()
+
+  def set_update_cb(self, cb):
+    self._update_cb = cb
 
   @classmethod
   def discover(cls):
@@ -203,6 +216,18 @@ class Emotiva(object):
     return output + ET.tostring(pkt)
 
   @property
+  def name(self):
+    return self._name
+
+  @property
+  def model(self):
+    return self._model
+
+  @property
+  def address(self):
+    return self._ip
+
+  @property
   def power(self):
     if self._current_state['power'] == 'On':
       return True
@@ -217,7 +242,7 @@ class Emotiva(object):
   @property
   def volume(self):
     if self._current_state['volume'] != None:
-      return int(self._current_state['volume'])
+      return float(self._current_state['volume'])
     return None
 
   def _volume_step(self, incr):
@@ -234,6 +259,16 @@ class Emotiva(object):
 
   def volume_down(self):
     self._volume_step(-1)
+
+  @property
+  def mute(self):
+    return self._muted
+
+  @mute.setter
+  def mute(self, enable):
+    mute_cmd = {True: 'mute_on', False: 'mute_off'}[enable]
+    msg = self.format_request('emotivaControl', [(mute_cmd, {'value': '0'})])
+    self._send_request(msg)
 
   @property
   def sources(self):
