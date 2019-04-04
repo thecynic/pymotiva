@@ -56,7 +56,7 @@ class EmotivaNotifier(threading.Thread):
         if event & select.POLLIN:
           with self._lock:
             sock = self._socks_by_fileno[fileno]
-          data, (ip, port) = sock.recvfrom(2048)
+          data, (ip, port) = sock.recvfrom(4096)
           _LOGGER.debug("Got data %s from %s:%d" % (data, ip, port))
           with self._lock:
             cb = self._devs[ip]
@@ -106,7 +106,7 @@ class Emotiva(object):
 
     while ack:
       try:
-        _resp_data, (ip, port) = self._ctrl_sock.recvfrom(2048)
+        _resp_data, (ip, port) = self._ctrl_sock.recvfrom(4096)
         resp = self._parse_response(_resp_data)
         self._handle_status(resp)
       except socket.timeout:
@@ -183,7 +183,7 @@ class Emotiva(object):
     devices = []
     while True:
       try:
-        _resp_data, (ip, port) = resp_sock.recvfrom(2048)
+        _resp_data, (ip, port) = resp_sock.recvfrom(4096)
         resp = cls._parse_response(_resp_data)
         devices.append((ip, resp))
       except socket.timeout:
@@ -192,6 +192,7 @@ class Emotiva(object):
       
   @classmethod
   def _parse_response(cls, data):
+    _LOGGER.debug(data)
     data_lines = data.decode('utf-8').split('\n')
     data_joined = ''.join([x.strip() for x in data_lines])
     root = ET.fromstring(data_joined)
