@@ -38,7 +38,6 @@ class EmotivaNotifier(threading.Thread):
     self.start()
 
   def register(self, ip, port, callback):
-    
     with self._lock:
       if port not in self._socks_by_port:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -52,10 +51,12 @@ class EmotivaNotifier(threading.Thread):
   def run(self):
     _LOGGER.debug("Connected")
     while True:
+      if not self._socks_by_fileno:
+        continue
       readable, writable, exceptional = select.select(self._socks_by_fileno,[] , [])
       for s in readable:
         with self._lock:
-          sock = s
+          sock = self._socks_by_fileno[s]
         data, (ip, port) = sock.recvfrom(4096)
         _LOGGER.debug("Got data %s from %s:%d" % (data, ip, port))
         with self._lock:
@@ -64,7 +65,7 @@ class EmotivaNotifier(threading.Thread):
 
 
 class Emotiva(object):
-  XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>'.encode('utf-8') 
+  XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>'.encode('utf-8')
   DISCOVER_REQ_PORT = 7000
   DISCOVER_RESP_PORT = 7001
   NOTIFY_EVENTS = set([
@@ -84,7 +85,14 @@ class Emotiva(object):
     self._setup_port_tcp = None
     self._ctrl_sock = None
     self._update_cb = None
-    self._modes = {'stereo', 'direct', 'dolby', 'dts', 'all_stereo', 'auto', 'reference_stereo', 'surround_mode'}
+    self._modes = {"Stereo" : 'stereo', 
+                  "Direct": 'direct',
+                  "Dolby": 'dolby',
+                  "DTS": 'dts', 
+                  "All Stereo" : 'all_stereo',
+                  "Auto":  'auto', 
+                  "Reference Stereo" :'reference_stereo', 
+                  "Surround": 'surround_mode'}
     self._events = events
 
     # current state
@@ -121,7 +129,7 @@ class Emotiva(object):
 
   def _subscribe_events(self, events):
     msg = self.format_request('emotivaSubscription',
-                              [(ev, {}) for ev in events], 
+                              [(ev, {}) for ev in events],
                               {'protocol':"3.0"} if self._proto_ver == 3 else {})
     self._send_request(msg, ack=True)
 
@@ -176,7 +184,7 @@ class Emotiva(object):
     resp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     resp_sock.bind(('', cls.DISCOVER_RESP_PORT))
     resp_sock.settimeout(0.5)
-    
+
     req_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     req_sock.bind(('', 0))
     req_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -195,7 +203,7 @@ class Emotiva(object):
       except socket.timeout:
         break
     return devices
-      
+
   @classmethod
   def _parse_response(cls, data):
     _LOGGER.debug(data)
@@ -218,7 +226,7 @@ class Emotiva(object):
     builder = ET.TreeBuilder()
     builder.start(pkt_type,pkt_attrs)
     for cmd, params in req:
-      builder.start(cmd, params) 
+      builder.start(cmd, params)
       builder.end(cmd)
     builder.end(pkt_type)
     pkt = builder.close()
@@ -251,9 +259,9 @@ class Emotiva(object):
   @property
   def volume(self):
     if self._current_state['volume'] != None:
-      return float(self._current_state['volume'])
+      return float(self._current_state['volume'].replace(" ", ""))
     return None
-  
+
   @volume.setter
   def volume(self, value):
     msg = self.format_request('emotivaControl', [('set_volume', {'value': str(value)})])
@@ -303,14 +311,21 @@ class Emotiva(object):
         [('source_%d' % self._sources[val], {'value': '0'})])
     self._send_request(msg)
 
+  
+  @property
+  def modes(self):
+    return tuple(self._modes.keys())
+  
   @property
   def mode(self):
     return self._current_state['mode']
 
   @mode.setter
   def mode(self, val):
-    if val not in self._modes: 
+    if val not in self._modes:
       raise InvalidModeError('Mode "%s" does not exist' % val)
-    msg = self.format_request('emotivaControl',[(val,  {'value': '0'})])
+    elif self._modes[val] is None:
+      raise InvalidModeError('Mode "%s" has bad value (%s)' % (
+          val, self._modes[val]))
+    msg = self.format_request('emotivaControl',[(self._modes[val],  {'value': '0'})])
     self._send_request(msg)
-
