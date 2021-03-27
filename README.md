@@ -1,6 +1,6 @@
 pymotiva
 =====
-A simple Python library for controlling an Emotiva XMC-1.
+A simple Python library for controlling an Emotiva XMC-1, RMC-1.
 
 Installation
 ------------

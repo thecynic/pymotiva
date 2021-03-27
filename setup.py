@@ -4,9 +4,9 @@ from setuptools import setup, find_packages
 
 setup(
     name = 'pymotiva',
-    version = '0.1.0',
+    version = '0.2.0',
     license = 'MIT',
-    description = 'Python library for Emotiva XMC-1',
+    description = 'Python library for Emotiva XMC-1,RMC-1',
     author = 'Dima Zavin',
     author_email = 'thecynic@gmail.com',
     url = 'http://github.com/thecynic/pymotiva',
@@ -20,6 +20,6 @@ setup(
         'Topic :: Home Automation',
         'Topic :: Software Development :: Libraries :: Python Modules',
     ],
-    install_requires=[],
+    install_requires=['lxml',],
     zip_safe=True,
 )

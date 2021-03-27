@@ -1,14 +1,14 @@
-#!/sur/bin/env python3
+#!/usr/bin/env python3
 
 __author__ = "Dima Zavin"
 __copyright__ = "Copyright 2016, Dima Zavin"
 
 import logging
+from os import name
 import select
 import socket
 import threading
-import time
-import xml.etree.ElementTree as ET
+from lxml import etree
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +23,8 @@ class InvalidTransponderResponseError(Error):
 class InvalidSourceError(Error):
   pass
 
+class InvalidModeError(Error):
+  pass
 
 class EmotivaNotifier(threading.Thread):
   def __init__(self):
@@ -32,7 +34,6 @@ class EmotivaNotifier(threading.Thread):
     self._socks_by_port = {}
     self._socks_by_fileno = {}
     self._lock = threading.Lock()
-    self._epoll = select.epoll()
     self.setDaemon(True)
     self.start()
 
@@ -44,27 +45,26 @@ class EmotivaNotifier(threading.Thread):
         sock.setblocking(0)
         self._socks_by_port[port] = sock
         self._socks_by_fileno[sock.fileno()] = sock
-        self._epoll.register(sock.fileno(), select.POLLIN)
       if ip not in self._devs:
         self._devs[ip] = callback
 
   def run(self):
-    _LOGGER.info("Connected")
+    _LOGGER.debug("Connected")
     while True:
-      events = self._epoll.poll(1)
-      for fileno, event in events:
-        if event & select.POLLIN:
-          with self._lock:
-            sock = self._socks_by_fileno[fileno]
-          data, (ip, port) = sock.recvfrom(4096)
-          _LOGGER.debug("Got data %s from %s:%d" % (data, ip, port))
-          with self._lock:
-            cb = self._devs[ip]
-          cb(data)
-
+      if not self._socks_by_fileno:
+        continue
+      readable, writable, exceptional = select.select(self._socks_by_fileno,[] , [])
+      for s in readable:
+        with self._lock:
+          sock = self._socks_by_fileno[s]
+        data, (ip, port) = sock.recvfrom(4096)
+        _LOGGER.debug("Got data %s from %s:%d" % (data, ip, port))
+        with self._lock:
+          cb = self._devs[ip]
+        cb(data)
 
 class Emotiva(object):
-  XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>'.encode('utf-8') 
+  XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>'.encode('utf-8')
   DISCOVER_REQ_PORT = 7000
   DISCOVER_RESP_PORT = 7001
   NOTIFY_EVENTS = set([
@@ -73,7 +73,7 @@ class Emotiva(object):
   ]).union(set(['input_%d' % d for d in range(1, 9)]))
   __notifier = EmotivaNotifier()
 
-  def __init__(self, ip, transp_xml):
+  def __init__(self, ip, transp_xml, events = NOTIFY_EVENTS):
     self._ip = ip
     self._name = 'Unknown'
     self._model = 'Unknown'
@@ -84,9 +84,19 @@ class Emotiva(object):
     self._setup_port_tcp = None
     self._ctrl_sock = None
     self._update_cb = None
+    self._modes = {"Stereo" :           ['stereo', 'mode_stereo', True],
+                  "Direct":             ['direct', 'mode_direct', True],
+                  "Dolby Surround":     ['dolby', 'mode_dolby', True],
+                  "DTS":                ['dts', 'mode_dts', True], 
+                  "All Stereo" :        ['all_stereo', 'mode_all_stereo', True],
+                  "Auto":               ['auto', 'mode_auto', True],
+                  "Reference Stereo" :  ['reference_stereo', 'mode_ref_stereo',True],
+                  "Surround":           ['surround_mode', 'mode_surround', True]}
+    self._events = events
 
     # current state
-    self._current_state = dict(((ev, None) for ev in self.NOTIFY_EVENTS))
+    self._current_state = dict(((ev, None) for ev in self._events))
+    self._current_state.update(dict(((m[1], None) for m in self._modes.values())))
     self._sources = {}
     self._muted = False
 
@@ -99,7 +109,7 @@ class Emotiva(object):
     self._ctrl_sock.bind(('', self._ctrl_port))
     self._ctrl_sock.settimeout(0.5)
     self.__notifier.register(self._ip, self._notify_port, self._notify_handler)
-    self._subscribe_events(self.NOTIFY_EVENTS)
+    self._subscribe_events(self._events)
 
   def _send_request(self, req, ack=False):
     self._ctrl_sock.sendto(req, (self._ip, self._ctrl_port))
@@ -107,6 +117,7 @@ class Emotiva(object):
     while ack:
       try:
         _resp_data, (ip, port) = self._ctrl_sock.recvfrom(4096)
+        _LOGGER.debug(_resp_data)
         resp = self._parse_response(_resp_data)
         self._handle_status(resp)
       except socket.timeout:
@@ -118,7 +129,8 @@ class Emotiva(object):
 
   def _subscribe_events(self, events):
     msg = self.format_request('emotivaSubscription',
-                              [(ev, None) for ev in events])
+                              [(ev, {}) for ev in events],
+                              {'protocol':"3.0"} if self._proto_ver == 3 else {})
     self._send_request(msg, ack=True)
 
   def __parse_transponder(self, transp_xml):
@@ -146,8 +158,15 @@ class Emotiva(object):
         continue
       val = (elem.get('value') or '').strip()
       visible = (elem.get('visible') or '').strip()
-      if ((elem.tag.startswith('input_') or elem.tag.startswith('mode_'))
-          and visible != "true"):
+      #update mode status
+      if (elem.tag.startswith('mode_') and visible != "true"):
+        _LOGGER.debug(' %s is no longer visible' % elem.tag)
+        for v in self._modes.items():
+          if(v[1][1] == elem.tag):
+            v[1][2] = False
+            self._modes.update({v[0]: v[1]})
+      #do not 
+      if (elem.tag.startswith('input_') and visible != "true"):
         continue
       if elem.tag == 'volume':
         if val == 'Mute':
@@ -168,16 +187,18 @@ class Emotiva(object):
     self._update_cb = cb
 
   @classmethod
-  def discover(cls):
+  def discover(cls, version = 2):
     resp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     resp_sock.bind(('', cls.DISCOVER_RESP_PORT))
     resp_sock.settimeout(0.5)
-    
+
     req_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     req_sock.bind(('', 0))
     req_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-    req = cls.format_request('emotivaPing', [])
+    if version == 3:
+      req = cls.format_request('emotivaPing', {}, {'protocol': "3.0"})
+    else:
+      req = cls.format_request('emotivaPing')
     req_sock.sendto(req, ('<broadcast>', cls.DISCOVER_REQ_PORT))
 
     devices = []
@@ -189,32 +210,38 @@ class Emotiva(object):
       except socket.timeout:
         break
     return devices
-      
+
   @classmethod
   def _parse_response(cls, data):
     _LOGGER.debug(data)
-    data_lines = data.decode('utf-8').split('\n')
-    data_joined = ''.join([x.strip() for x in data_lines])
-    root = ET.fromstring(data_joined)
+    try: 
+      parser = etree.XMLParser(ns_clean=True, recover = True)
+      root = etree.XML(data, parser)
+    except etree.ParseError:
+      _LOGGER.error("Malformed XML")
+      _LOGGER.error(data)
+      root = ""
     return root
 
   @classmethod
-  def format_request(cls, pkt_type, req):
+  def format_request(cls, pkt_type, req = {}, pkt_attrs = {}):
     """
-
     req is a list of 2-element tuples with first element being the command,
     and second being a dict of parameters. E.g.
     ('power_on', {'value': "0"})
+
+    pkt_attrs is a dictionary containing element attributes. E.g.
+    {'protocol': "3.0"}
     """
     output = cls.XML_HEADER
-    builder = ET.TreeBuilder()
-    builder.start(pkt_type)
+    builder = etree.TreeBuilder()
+    builder.start(pkt_type,pkt_attrs)
     for cmd, params in req:
-      builder.start(cmd, params) 
+      builder.start(cmd, params)
       builder.end(cmd)
     builder.end(pkt_type)
     pkt = builder.close()
-    return output + ET.tostring(pkt)
+    return output + etree.tostring(pkt)
 
   @property
   def name(self):
@@ -243,8 +270,13 @@ class Emotiva(object):
   @property
   def volume(self):
     if self._current_state['volume'] != None:
-      return float(self._current_state['volume'])
+      return float(self._current_state['volume'].replace(" ", ""))
     return None
+
+  @volume.setter
+  def volume(self, value):
+    msg = self.format_request('emotivaControl', [('set_volume', {'value': str(value)})])
+    self._send_request(msg)
 
   def _volume_step(self, incr):
     # The XMC-1 with firmware version <= 3.1a will not change the volume unless
@@ -288,4 +320,24 @@ class Emotiva(object):
           val, self._sources[val]))
     msg = self.format_request('emotivaControl',
         [('source_%d' % self._sources[val], {'value': '0'})])
+    self._send_request(msg)
+
+  
+  @property
+  def modes(self):
+    #we return only the modes that are active
+    return tuple(dict(filter(lambda elem: elem[1][2] == True, self._modes.items())).keys())
+  
+  @property
+  def mode(self):
+    return self._current_state['mode']
+
+  @mode.setter
+  def mode(self, val):
+    if val not in self._modes:
+      raise InvalidModeError('Mode "%s" does not exist' % val)
+    elif self._modes[val][0] is None:
+      raise InvalidModeError('Mode "%s" has bad value (%s)' % (
+          val, self._modes[val][0]))
+    msg = self.format_request('emotivaControl',[(self._modes[val][0],  {'value': '0'})])
     self._send_request(msg)
